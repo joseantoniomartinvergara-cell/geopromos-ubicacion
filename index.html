@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GeoPromos · Ubicación</title>
+  <style>
+    :root { --tinta:#0e2a3b; --plano:#e8eef2; --radio:#2f6fed; --etiqueta:#ffd23f; --sup:#fff; --borde:#c9d6de; --suave:#52687a; --error:#b3261e; --ok:#1f9d55; }
+    @media (prefers-color-scheme: dark) { :root { --tinta:#e8eef2; --plano:#0b1c27; --sup:#12303f; --borde:#27475a; --suave:#9fb4c3; --error:#ff8a80; } }
+    * { box-sizing: border-box; }
+    body { margin:0; font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--plano); color:var(--tinta); }
+    main { max-width:520px; margin:0 auto; padding:20px 16px 60px; }
+    h1 { font-size:1.4rem; margin:0 0 4px; }
+    .tarjeta { background:var(--sup); border:1px solid var(--borde); border-radius:16px; padding:20px; margin-top:16px; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    input { width:100%; min-height:48px; padding:0 14px; font:inherit; border:1.5px solid var(--borde); border-radius:12px; background:transparent; color:inherit; }
+    button { min-height:48px; padding:0 20px; font:inherit; font-weight:700; border:0; border-radius:12px; background:var(--radio); color:#fff; cursor:pointer; margin-top:12px; max-width:100%; }
+    button.sec { background:transparent; color:inherit; border:1.5px solid var(--borde); }
+    button:disabled { opacity:.6; cursor:default; }
+    .suave { color:var(--suave); font-size:.92rem; }
+    .error { color:var(--error); font-weight:600; margin-top:10px; overflow-wrap:anywhere; }
+    .estado { display:flex; align-items:center; gap:10px; font-weight:700; }
+    .punto { width:12px; height:12px; border-radius:50%; background:var(--suave); flex:none; }
+    .activa .punto { background:var(--ok); }
+    [hidden] { display:none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>GeoPromos · Ubicación</h1>
+  <p class="suave">Esta página envía tu posición a GeoPromos para que puedas recibir avisos de ofertas cercanas. Mantenla abierta mientras quieras recibirlos.</p>
+
+  <section id="vLogin" class="tarjeta" hidden>
+    <div id="pEmail">
+      <label for="email">Tu email de GeoPromos</label>
+      <input id="email" type="email" autocomplete="email" inputmode="email">
+      <button id="btnCodigo" type="button">Enviarme un código</button>
+    </div>
+    <div id="pCodigo" hidden>
+      <label for="codigo">Código de 6 dígitos (revisa tu correo)</label>
+      <input id="codigo" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+      <button id="btnVerificar" type="button">Entrar</button>
+      <button id="btnOtro" class="sec" type="button">Cambiar email</button>
+    </div>
+    <p id="errLogin" class="error" role="alert" hidden></p>
+    <p class="suave">Debes tener ya tu cuenta de usuario creada, con teléfono y consentimiento guardados, desde la aplicación principal.</p>
+  </section>
+
+  <section id="vApp" class="tarjeta" hidden>
+    <div id="estado" class="estado"><span class="punto"></span><span id="estadoTxt">Localización inactiva</span></div>
+    <p id="datos" class="suave">—</p>
+    <button id="btnGeo" type="button">Activar localización</button>
+    <button id="btnAhora" class="sec" type="button">Actualizar mi ubicación</button>
+    <p id="errApp" class="error" role="alert" hidden></p>
+    <button id="btnSalir" class="sec" type="button">Salir</button>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ========= CONFIGURACIÓN: pega aquí la URL de tu aplicación web (termina en /exec) ========= */
+  var URL_APP = 'https://script.google.com/macros/s/AKfycbzumzr_ELruLD_mdoeeeVUGFmt1aMJhvDLI8ePYqI0etPK1QNqUqBUUlrdtGZevPOhcUQ/exec';
+  var INTERVALO_S = 60;   // enviar como mínimo cada 60 s
+  var MOVIMIENTO_M = 50;  // o al moverte más de 50 m
+  /* ============================================================================================ */
+
+  var CLAVE = 'geopromos_token_externo';
+  var $ = function (id) { return document.getElementById(id); };
+  var S = { token: '', email: '', watch: null, tick: null, ult: null, ultT: 0, enviando: false };
+
+  function guardarToken(t) { try { if (t) localStorage.setItem(CLAVE, t); else localStorage.removeItem(CLAVE); } catch (e) {} }
+  function leerToken() { try { return localStorage.getItem(CLAVE) || ''; } catch (e) { return ''; } }
+  function msg(id, t) { var e = $(id); e.textContent = t || ''; e.hidden = !t; }
+
+  /* POST como text/plain: evita la petición previa (preflight) que Apps Script no admite */
+  async function post(cuerpo) {
+    if (URL_APP.indexOf('PEGA_AQUI') >= 0) throw new Error('Falta configurar la URL de la aplicación en esta página.');
+    var r;
+    try {
+      r = await fetch(URL_APP, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(cuerpo), redirect: 'follow' });
+    } catch (e) { throw new Error('No se pudo contactar con el servidor.'); }
+    var js;
+    try { js = await r.json(); } catch (e) { throw new Error('Respuesta no válida del servidor.'); }
+    if (!js.ok) { var er = new Error(js.error || 'Error.'); er.codigo = js.codigo; throw er; }
+    return js.data;
+  }
+
+  function dist(a, b, c, d) {
+    var R = 6371000, k = Math.PI / 180, x = (c - a) * k, y = (d - b) * k;
+    var q = Math.sin(x / 2) * Math.sin(x / 2) + Math.cos(a * k) * Math.cos(c * k) * Math.sin(y / 2) * Math.sin(y / 2);
+    return R * 2 * Math.atan2(Math.sqrt(q), Math.sqrt(1 - q));
+  }
+
+  function vista(v) { $('vLogin').hidden = v !== 'login'; $('vApp').hidden = v !== 'app'; }
+
+  function pintar(clase, txt, datos) {
+    $('estado').className = 'estado ' + clase;
+    $('estadoTxt').textContent = txt;
+    if (datos) $('datos').textContent = datos;
+  }
+
+  async function enviar(lat, lng, precision) {
+    if (S.enviando) return;
+    S.enviando = true;
+    try {
+      var r = await post({ accion: 'ubicacion', token: S.token, lat: lat, lng: lng, precision: Math.round(precision || 0) });
+      S.ult = { lat: lat, lng: lng }; S.ultT = Date.now();
+      var n = r && r.avisos ? r.avisos : 0;
+      pintar('activa', 'Localización activa',
+        'Último envío ' + new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) +
+        (n ? ' · ' + n + ' aviso(s) enviado(s)' : ' · sin avisos nuevos'));
+      msg('errApp', r && r.errores && r.errores.length ? 'Algún aviso no se pudo enviar.' : '');
+    } catch (e) {
+      if (e.codigo === 'SESION') { parar(); guardarToken(''); vista('login'); msg('errLogin', 'Tu sesión ha caducado. Entra de nuevo.'); }
+      else msg('errApp', e.message);
+    } finally { S.enviando = false; }
+  }
+
+  function alPosicion(p) {
+    var c = p.coords;
+    var mov = !S.ult || dist(S.ult.lat, S.ult.lng, c.latitude, c.longitude) >= MOVIMIENTO_M;
+    var tiempo = Date.now() - S.ultT >= INTERVALO_S * 1000;
+    S.actual = { lat: c.latitude, lng: c.longitude, precision: c.accuracy };
+    if (mov || tiempo) enviar(c.latitude, c.longitude, c.accuracy);
+  }
+
+  function alError(err) {
+    var t = {
+      1: 'Permiso de ubicación denegado. Actívalo en los ajustes del navegador para este sitio.',
+      2: 'No se pudo determinar tu posición.',
+      3: 'La ubicación tarda demasiado en responder.'
+    }[err && err.code] || 'No se pudo obtener la ubicación.';
+    msg('errApp', t);
+    if (err && err.code === 1) parar();
+  }
+
+  function activar() {
+    msg('errApp', '');
+    if (!navigator.geolocation) { msg('errApp', 'Este navegador no ofrece geolocalización.'); return; }
+    pintar('activa', 'Localización activa', 'Buscando tu posición…');
+    $('btnGeo').textContent = 'Detener localización';
+    S.watch = navigator.geolocation.watchPosition(alPosicion, alError, { enableHighAccuracy: true, maximumAge: 15000, timeout: 30000 });
+    // Reenvío periódico aunque no te muevas
+    S.tick = setInterval(function () {
+      if (S.actual && Date.now() - S.ultT >= INTERVALO_S * 1000) enviar(S.actual.lat, S.actual.lng, S.actual.precision);
+    }, 5000);
+  }
+
+  function parar() {
+    if (S.watch !== null && navigator.geolocation) navigator.geolocation.clearWatch(S.watch);
+    clearInterval(S.tick);
+    S.watch = null; S.tick = null;
+    $('btnGeo').textContent = 'Activar localización';
+    pintar('', 'Localización inactiva', 'Actívala para recibir avisos cercanos.');
+  }
+
+  $('btnGeo').onclick = function () { if (S.watch !== null) parar(); else activar(); };
+
+  $('btnAhora').onclick = function () {
+    msg('errApp', '');
+    if (!navigator.geolocation) { msg('errApp', 'Este navegador no ofrece geolocalización.'); return; }
+    navigator.geolocation.getCurrentPosition(function (p) {
+      enviar(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
+    }, alError, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+  };
+
+  $('btnCodigo').onclick = async function () {
+    msg('errLogin', '');
+    var email = $('email').value.trim().toLowerCase();
+    if (!email) { msg('errLogin', 'Escribe tu email.'); return; }
+    this.disabled = true;
+    try {
+      await post({ accion: 'solicitarCodigo', email: email });
+      S.email = email; $('pEmail').hidden = true; $('pCodigo').hidden = false; $('codigo').focus();
+    } catch (e) { msg('errLogin', e.message); }
+    this.disabled = false;
+  };
+
+  $('btnOtro').onclick = function () { $('pCodigo').hidden = true; $('pEmail').hidden = false; msg('errLogin', ''); };
+
+  $('btnVerificar').onclick = async function () {
+    msg('errLogin', '');
+    this.disabled = true;
+    try {
+      var r = await post({ accion: 'verificarCodigo', email: S.email, codigo: $('codigo').value, registro: {} });
+      if (!r.perfil || !r.perfil.usuario || r.perfil.usuario.rol !== 'USUARIO') {
+        throw new Error('Esta página es solo para usuarios finales. Usa la aplicación principal.');
+      }
+      S.token = r.token; guardarToken(S.token); vista('app'); parar();
+    } catch (e) { msg('errLogin', e.message); }
+    this.disabled = false;
+  };
+
+  $('btnSalir').onclick = function () { parar(); guardarToken(''); S.token = ''; $('codigo').value = ''; $('pCodigo').hidden = true; $('pEmail').hidden = false; vista('login'); };
+
+  window.addEventListener('pagehide', parar);
+
+  (async function inicio() {
+    var t = leerToken();
+    if (!t) { vista('login'); return; }
+    try {
+      var p = await post({ accion: 'obtenerPerfil', token: t });
+      if (p.usuario.rol !== 'USUARIO') throw new Error('rol');
+      S.token = t; vista('app'); pintar('', 'Localización inactiva', 'Actívala para recibir avisos cercanos.');
+    } catch (e) { guardarToken(''); vista('login'); }
+  })();
+})();
+</script>
+</body>
+</html>
