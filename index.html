@@ -34,7 +34,7 @@
     <div id="pEmail">
       <label for="email">Tu email de GeoPromos</label>
       <input id="email" type="email" autocomplete="email" inputmode="email">
-      <button id="btnCodigo" type="button">Enviarme un código</button>
+      <button id="btnCodigo" type="button">Entrar</button>
     </div>
     <div id="pCodigo" hidden>
       <label for="codigo">Código de 6 dígitos (revisa tu correo)</label>
@@ -72,6 +72,10 @@
 
   function guardarToken(t) { try { if (t) localStorage.setItem(CLAVE, t); else localStorage.removeItem(CLAVE); } catch (e) {} }
   function leerToken() { try { return localStorage.getItem(CLAVE) || ''; } catch (e) { return ''; } }
+  // Dispositivo recordado (tras verificar con código una vez, no vuelve a pedirlo en este navegador)
+  var CLAVE_DISP = 'geopromos_dispositivo_externo';
+  function leerDisp(email) { try { var d = JSON.parse(localStorage.getItem(CLAVE_DISP) || '{}'); return d.email === email ? d.token : ''; } catch (e) { return ''; } }
+  function guardarDisp(email, t) { try { if (t) localStorage.setItem(CLAVE_DISP, JSON.stringify({ email: email, token: t })); } catch (e) {} }
   function msg(id, t) { var e = $(id); e.textContent = t || ''; e.hidden = !t; }
 
   /* POST como text/plain: evita la petición previa (preflight) que Apps Script no admite */
@@ -172,8 +176,17 @@
     if (!email) { msg('errLogin', 'Escribe tu email.'); return; }
     this.disabled = true;
     try {
-      await post({ accion: 'solicitarCodigo', email: email });
-      S.email = email; $('pEmail').hidden = true; $('pCodigo').hidden = false; $('codigo').focus();
+      S.email = email;
+      try {
+        // Usuario final: entra solo con el email
+        var r = await post({ accion: 'entrarUsuario', email: email, dispositivo: leerDisp(email) });
+        S.token = r.token; guardarToken(S.token); vista('app'); parar();
+      } catch (e1) {
+        if (e1.codigo !== 'REQUIERE_CODIGO') throw e1;
+        // La cuenta (o el ajuste del administrador) exige código por correo
+        await post({ accion: 'solicitarCodigo', email: email });
+        $('pEmail').hidden = true; $('pCodigo').hidden = false; $('codigo').focus();
+      }
     } catch (e) { msg('errLogin', e.message); }
     this.disabled = false;
   };
@@ -188,6 +201,7 @@
       if (!r.perfil || !r.perfil.usuario || r.perfil.usuario.rol !== 'USUARIO') {
         throw new Error('Esta página es solo para usuarios finales. Usa la aplicación principal.');
       }
+      guardarDisp(S.email, r.dispositivo);
       S.token = r.token; guardarToken(S.token); vista('app'); parar();
     } catch (e) { msg('errLogin', e.message); }
     this.disabled = false;
